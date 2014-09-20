@@ -1,0 +1,123 @@
+from django_twilio.decorators import twilio_view
+from twilio.twiml import Response
+from phonelyapp.models import Person
+
+from django.shortcuts import render_to_response, RequestContext
+
+import random
+import re
+
+# Commands
+unsubscribe_command = '.unsubscribe' # Unsubscribe from service
+end_command = '.end' # End conversation
+help_command = '.help' # Get help
+
+@twilio_view
+def sms(request):
+	fromid = request.POST.get('From','') # Person messaging the service
+	if not Person.objects.filter(phone_number=fromid).exists():
+		return newUser(request)
+	else:
+		p = Person.objects.get(phone_number=fromid)
+		txt = request.POST.get('Body','')
+		a = scrubText(txt, p, request) # Scrub the texts for custom  commands
+		if a: # If a custom command was inputted
+			return a
+		elif p.partner: # If they are in a conversation
+			return continuedConversation(p, request)
+		else: # If they want to start a conversation
+			return newConversation(p, request)
+
+@twilio_view
+def newConversation(person_one, request):
+	''' Person wanting a new conversation '''
+	phone = request.POST.get('From','')
+	people = Person.objects.filter(partner=None).exclude(phone_number=phone).all() # All available people
+	if len(people) == 0: # No one is available
+		r = Response()
+		r.message(msg='Sorry, there are no open conversations right now. Please check back later.', to=phone)
+		return r
+	person_two = people[random.randint(0,len(people)-1)] # Choose a random person
+	person_one.partner = person_two
+	person_one.save()
+	person_two.partner = person_one
+	person_two.save()
+	message = 'New message: %s' % (request.POST.get('Body',''))
+	r = Response()
+	r.message(msg=message, to=person_two.phone_number)
+	return r
+
+@twilio_view
+def newUser(request):
+	''' Create new user '''
+	phone = request.POST.get('From','')
+	p = Person(phone_number=phone)
+	p.save()
+	message = 'Welcome! By texting this number you agree to have your number in our database. Text "%s" to remove it. To start a conversation, respond with anything. Text "%s" at any time to get help.' % (unsubscribe_command, help_command)
+	r = Response()
+	r.message(msg=message, to=p.phone_number)
+	return r
+
+@twilio_view
+def continuedConversation(person_one, request):
+	''' Method for continuing a conversation '''
+	message = request.POST.get('Body','')
+	if re.match('speak',message,re.IGNORECASE):
+		message = message[6:]
+		r = Response()
+		r.say(msg=message,to=person_one.partner.phone_number)
+		return r
+	r = Response()
+	r.message(msg=message,to=person_one.partner.phone_number)
+	return r
+
+@twilio_view
+def endConversation(person_one, request):
+	''' Method for ending a conversation '''
+	if person_one.partner == None:
+		r = Response()
+		r.message(msg='You are not in an active conversation.',to=person_one.phone_number)
+		return r
+	person_one.partner.partner = None
+	person_one.partner.save()
+	person_one.partner = None
+	person_one.save()
+	r = Response()
+	r.message(msg='You have ended this conversation.', to=person_one.phone_number)
+	return r
+
+@twilio_view
+def giveHelp(person_one, request):
+	''' Method for ending a conversation '''
+	help_message = ''
+	help_message += 'End conversation: %s Unsubscribe: %s Help: %s' % (end_command, unsubscribe_command, help_command)
+	r = Response()
+	r.message(msg=help_message, to=person_one.phone_number)
+	return r
+
+@twilio_view
+def unsubscribe(person_one, request):
+	''' Method for ending a conversation '''
+	phone = person_one.phone_number
+	person_one.delete()
+	message = 'You have unsubscribed.'
+	r = Response()
+	r.message(msg=message, to=phone)
+	return r
+
+def scrubText(txt,p,request):
+	''' Scrub the body text '''
+	print 'some text'
+	if re.match(end_command,txt,re.IGNORECASE):
+		return endConversation(p,request)
+	if re.match(help_command,txt,re.IGNORECASE):
+		return giveHelp(p,request)
+	if re.match(unsubscribe_command,txt,re.IGNORECASE):
+		return unsubscribe(p,request)
+	return False
+
+# Related to web view, not to the app
+
+def index(request):
+	context = {}
+	return render_to_response('index.html',context,context_instance=RequestContext(request))
